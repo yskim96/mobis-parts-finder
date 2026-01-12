@@ -166,9 +166,12 @@
         let isSearching = false;
         let foundParts = [];
 
-        // 바리에이션 생성: A-Z, 01-10, XX
+        // 바리에이션 생성: 기본, A-Z, 01-10, XX
         function getVariations() {
             const variations = [];
+
+            // 기본 품번 (접미사 없음)
+            variations.push('');
 
             // A부터 Z까지
             for (let i = 65; i <= 90; i++) {
