@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mobis 부품 검색기</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        body {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .search-box {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+        }
+        input[type="text"]:focus {
+            border-color: #007bff;
+            outline: none;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #stopBtn {
+            background: #dc3545;
+        }
+        #stopBtn:hover {
+            background: #c82333;
+        }
+        .progress {
+            background: #e9ecef;
+            border-radius: 4px;
+            height: 24px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            background: #007bff;
+            height: 100%;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+        }
+        #status {
+            text-align: center;
+            color: #666;
+            margin-bottom: 15px;
+        }
+        .results {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            background: #007bff;
+            color: white;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        .found {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .not-found {
+            color: #999;
+        }
+        .delay-info {
+            font-size: 12px;
+            color: #888;
+            text-align: center;
+            margin-top: 10px;
+        }
+        #exportBtn {
+            background: #28a745;
+            margin-left: 10px;
+        }
+        #exportBtn:hover {
+            background: #1e7e34;
+        }
+    </style>
+</head>
+<body>
+    <h1>Mobis 부품 검색기</h1>
+
+    <div class="search-box">
+        <div class="input-group">
+            <input type="text" id="partNumber" placeholder="기본 품번 입력 (예: 0K93050020)">
+            <button id="searchBtn" onclick="startSearch()">검색</button>
+            <button id="stopBtn" onclick="stopSearch()" disabled>중지</button>
+            <button id="exportBtn" onclick="exportCSV()" disabled>CSV 저장</button>
+        </div>
+        <div class="progress">
+            <div class="progress-bar" id="progressBar" style="width: 0%">0%</div>
+        </div>
+        <div id="status">품번을 입력하고 검색 버튼을 클릭하세요</div>
+        <div class="delay-info">* 서버 부하 방지를 위해 요청 간 0.5~2초 랜덤 딜레이가 적용됩니다</div>
+    </div>
+
+    <div class="results">
+        <table>
+            <thead>
+                <tr>
+                    <th>품번</th>
+                    <th>한글명</th>
+                    <th>영문명</th>
+                    <th>가격 (VAT 포함)</th>
+                </tr>
+            </thead>
+            <tbody id="resultsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        let isSearching = false;
+        let foundParts = [];
+
+        // 바리에이션 생성: A-Z, 01-10, XX
+        function getVariations() {
+            const variations = [];
+
+            // A부터 Z까지
+            for (let i = 65; i <= 90; i++) {
+                variations.push(String.fromCharCode(i));
+            }
+
+            // 01부터 10까지 (zero padding)
+            for (let i = 1; i <= 10; i++) {
+                variations.push(String(i).padStart(2, '0'));
+            }
+
+            // XX
+            variations.push('XX');
+
+            return variations;
+        }
+
+        // 랜덤 딜레이 (500ms ~ 2000ms)
+        function randomDelay() {
+            const delay = Math.floor(Math.random() * 1500) + 500;
+            return new Promise(resolve => setTimeout(resolve, delay));
+        }
+
+        // CORS Proxy를 통한 API 호출 (재시도 포함)
+        async function fetchPart(partNumber, retryCount = 0) {
+            const maxRetries = 2;
+            const baseUrl = 'https://www.mobis-as.com/simple_search_partLoad.do';
+            const params = new URLSearchParams({
+                pageIndex: '1',
+                hkgb: 'K',
+                vtyp: 'undefined',
+                catSeq: '',
+                srchType: 'ptno',
+                inText: partNumber
+            });
+
+            const targetUrl = baseUrl + '?' + params;
+
+            // 여러 CORS 프록시 옵션
+            const proxyUrls = [
+                `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+                `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+                `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`
+            ];
+
+            for (const proxyUrl of proxyUrls) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                    const response = await fetch(proxyUrl, {
+                        method: 'GET',
+                        signal: controller.signal,
+                        headers: {
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                        }
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (response.ok) {
+                        const html = await response.text();
+                        return parseResponse(html, partNumber);
+                    }
+                } catch (e) {
+                    console.log(`Proxy failed: ${proxyUrl}`, e.message);
+                    continue;
+                }
+            }
+
+            // 모든 프록시 실패 시 재시도
+            if (retryCount < maxRetries) {
+                console.log(`Retrying ${partNumber}... (${retryCount + 1}/${maxRetries})`);
+                await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+                return fetchPart(partNumber, retryCount + 1);
+            }
+
+            return null;
+        }
+
+        // HTML 응답 파싱
+        function parseResponse(html, partNumber) {
+            // 결과가 없는 경우
+            if (html.includes('검색결과가 없습니다') || html.trim() === '' || html.includes('nodata')) {
+                return null;
+            }
+
+            try {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+
+                // 테이블에서 데이터 추출 시도
+                const rows = doc.querySelectorAll('tr');
+
+                for (const row of rows) {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length >= 4) {
+                        const pno = cells[0]?.textContent?.trim() || '';
+                        if (pno.includes(partNumber) || partNumber.includes(pno.replace(/[^A-Z0-9]/gi, ''))) {
+                            return {
+                                partNumber: pno || partNumber,
+                                koreanName: cells[1]?.textContent?.trim() || '-',
+                                englishName: cells[2]?.textContent?.trim() || '-',
+                                price: cells[3]?.textContent?.trim() || '-'
+                            };
+                        }
+                    }
+                }
+
+                // 다른 형식으로 파싱 시도
+                const text = html;
+                if (text.includes(partNumber)) {
+                    // 가격 패턴 찾기
+                    const priceMatch = text.match(/[\d,]+\s*원/);
+                    const korMatch = text.match(/[가-힣]+\s*(어셈블리|어셈블리|ASSY|assy)[가-힣\s-]*/i);
+                    const engMatch = text.match(/[A-Z]+-[A-Z]+/);
+
+                    if (priceMatch) {
+                        return {
+                            partNumber: partNumber,
+                            koreanName: korMatch ? korMatch[0].trim() : '-',
+                            englishName: engMatch ? engMatch[0].trim() : '-',
+                            price: priceMatch[0]
+                        };
+                    }
+                }
+
+                return null;
+            } catch (e) {
+                console.error('Parse error:', e);
+                return null;
+            }
+        }
+
+        async function startSearch() {
+            const basePartNumber = document.getElementById('partNumber').value.trim();
+            if (!basePartNumber) {
+                alert('품번을 입력하세요');
+                return;
+            }
+
+            isSearching = true;
+            foundParts = [];
+            document.getElementById('searchBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('exportBtn').disabled = true;
+            document.getElementById('resultsBody').innerHTML = '';
+
+            const variations = getVariations();
+            const total = variations.length;
+
+            for (let i = 0; i < variations.length; i++) {
+                if (!isSearching) break;
+
+                const fullPartNumber = basePartNumber + variations[i];
+                const progress = Math.round(((i + 1) / total) * 100);
+
+                document.getElementById('progressBar').style.width = progress + '%';
+                document.getElementById('progressBar').textContent = progress + '%';
+                document.getElementById('status').textContent = `검색 중: ${fullPartNumber} (${i + 1}/${total})`;
+
+                try {
+                    const result = await fetchPart(fullPartNumber);
+
+                    if (result) {
+                        foundParts.push(result);
+                        addResultRow(result, true);
+                    } else {
+                        addResultRow({ partNumber: fullPartNumber }, false);
+                    }
+                } catch (e) {
+                    console.error(`Error fetching ${fullPartNumber}:`, e);
+                    addResultRow({ partNumber: fullPartNumber, error: e.message }, false);
+                }
+
+                // 랜덤 딜레이
+                if (i < variations.length - 1 && isSearching) {
+                    await randomDelay();
+                }
+            }
+
+            isSearching = false;
+            document.getElementById('searchBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('exportBtn').disabled = foundParts.length === 0;
+            document.getElementById('status').textContent = `완료! ${foundParts.length}개 부품 발견`;
+        }
+
+        function stopSearch() {
+            isSearching = false;
+            document.getElementById('status').textContent = '검색 중지됨';
+            document.getElementById('searchBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('exportBtn').disabled = foundParts.length === 0;
+        }
+
+        function addResultRow(data, found) {
+            const tbody = document.getElementById('resultsBody');
+            const row = document.createElement('tr');
+
+            if (found) {
+                row.innerHTML = `
+                    <td class="found">${data.partNumber}</td>
+                    <td>${data.koreanName}</td>
+                    <td>${data.englishName}</td>
+                    <td>${data.price}</td>
+                `;
+            } else {
+                row.innerHTML = `
+                    <td class="not-found">${data.partNumber}</td>
+                    <td colspan="3" class="not-found">결과 없음</td>
+                `;
+            }
+
+            tbody.appendChild(row);
+            row.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function exportCSV() {
+            if (foundParts.length === 0) {
+                alert('저장할 데이터가 없습니다');
+                return;
+            }
+
+            const headers = ['품번', '한글명', '영문명', '가격'];
+            const rows = foundParts.map(p => [
+                p.partNumber,
+                p.koreanName,
+                p.englishName,
+                p.price
+            ]);
+
+            const csvContent = [headers, ...rows]
+                .map(row => row.map(cell => `"${cell}"`).join(','))
+                .join('\n');
+
+            const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = `mobis_parts_${document.getElementById('partNumber').value}_${new Date().toISOString().slice(0,10)}.csv`;
+            link.click();
+        }
+    </script>
+</body>
+</html>
